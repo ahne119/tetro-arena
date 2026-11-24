@@ -1,17 +1,12 @@
 /* =========================================================
-   TETRO ARENA - Solos, AI 2v2 Team Battle & Firebase Online
+   TETRO ARENA - Solos, AI 2v2 Team Battle & Supabase Online
    ========================================================= */
 
-// [선택] 깃허브 배포 시 아래 객체에 본인 Firebase 설정을 직접 붙여넣으면
-// 모든 방문자가 별도 설정 없이 바로 온라인 기능을 이용할 수 있습니다.
-const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: "",
-  authDomain: "",
-  databaseURL: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+// [중요] 깃허브 배포 시 아래에 본인 Supabase Project URL과 Key를 입력해 올리면
+// 사이트를 방문하는 모든 사람이 별도 설정 없이 바로 온라인 기능을 이용할 수 있습니다.
+const DEFAULT_SUPABASE_CONFIG = {
+  url: "", // 예: "https://xxxxxxxx.supabase.co"
+  key: ""  // 예: "sb_publishable_..." 또는 anon public key
 };
 
 const COLS = 10;
@@ -252,11 +247,9 @@ class TetroEngine {
       this.lines += cleared;
       this.level = Math.floor(this.lines / 10) + 1;
 
-      // 공격 줄 계산 (2줄=1, 3줄=2, 4줄=4 + 콤보 보너스)
       let attack = cleared === 2 ? 1 : cleared === 3 ? 2 : cleared >= 4 ? 4 : 0;
       if (this.combo >= 2 && cleared >= 1) attack += Math.min(3, this.combo - 1);
 
-      // 들어온 방해 줄 상쇄
       if (this.incomingGarbage > 0 && attack > 0) {
         const cancel = Math.min(this.incomingGarbage, attack);
         this.incomingGarbage -= cancel;
@@ -343,7 +336,6 @@ class TetroEngine {
     }
   }
 
-  /* AI 배치 계산 (높이, 빈 구멍, 줄 제거 평가) */
   computeBestAIMove() {
     let bestScore = -Infinity;
     let best = { rot: 0, x: this.current.x };
@@ -428,7 +420,6 @@ class TetroEngine {
   }
 
   encodeBoard() {
-    // 현재 블록까지 합쳐서 200자 문자열로 압축 전송
     const snap = this.board.map(r => [...r]);
     if (this.alive && this.current) {
       const { matrix, x, y } = this.current;
@@ -444,9 +435,9 @@ class TetroEngine {
   }
 }
 
-/* ----------------- 전역 앱 상태 & DOM ----------------- */
+/* ----------------- 전역 앱 상태 & Supabase 연동 ----------------- */
 const App = {
-  mode: 'solo', // 'solo' | 'ai_team' | 'online'
+  mode: 'solo',
   isRunning: false,
   isPaused: false,
   lastTime: 0,
@@ -456,28 +447,31 @@ const App = {
   aiEngines: [],
   remotePlayers: {},
 
-  firebaseReady: false,
-  db: null,
+  sbReady: false,
+  sb: null,
+  lobbyChannel: null,
+  roomChannel: null,
+
   myId: 'p_' + Math.random().toString(36).slice(2, 9),
   myTeam: 'RED',
+  myJoinedAt: 0,
   currentRoom: null,
+  roomStatus: 'waiting',
   roomHostId: null,
-  roomListeners: [],
-  roomStartTs: 0,
   lastSyncTs: 0,
 
   init() {
     this.cacheDOM();
     this.bindEvents();
     this.loadSavedProfile();
-    this.initFirebase();
+    this.initSupabase();
 
     this.player = new TetroEngine({
       id: this.myId,
       name: this.getNickname(),
       team: 'RED',
       onAttack: (eng, amount) => this.handlePlayerAttack(eng, amount),
-      onStateChange: () => this.syncOnlineState(true),
+      onStateChange: () => this.syncOnlineState(),
       onGameOver: () => this.handlePlayerGameOver()
     });
 
@@ -520,7 +514,6 @@ const App = {
   },
 
   bindEvents() {
-    // 모드 변경
     document.querySelectorAll('.mode-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (this.isRunning && !confirm('진행 중인 게임을 종료하고 모드를 바꿀까요?')) return;
@@ -530,7 +523,6 @@ const App = {
       });
     });
 
-    // 탭 전환 (채팅/랭킹)
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -563,9 +555,9 @@ const App = {
     this.nicknameInput.addEventListener('change', () => {
       localStorage.setItem('tetro_nickname', this.getNickname());
       if (this.player) this.player.name = this.getNickname();
+      if (this.roomChannel && this.currentRoom) this.trackRoomPresence();
     });
 
-    // 키보드 조작
     window.addEventListener('keydown', (e) => {
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -612,7 +604,6 @@ const App = {
       this.renderPlayerArea();
     });
 
-    // 모바일 터치 버튼
     document.querySelectorAll('.touch-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (!this.isRunning || this.isPaused || !this.player?.alive) return;
@@ -627,7 +618,6 @@ const App = {
       });
     });
 
-    // 채팅 전송
     this.chatForm.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = this.chatInput.value.trim();
@@ -638,27 +628,27 @@ const App = {
 
     document.getElementById('refreshRankBtn').addEventListener('click', () => this.loadRankings());
 
-    // Firebase 설정 모달
+    // Supabase 설정 모달
     const modal = document.getElementById('configModal');
     document.getElementById('openConfigBtn').addEventListener('click', () => {
-      const saved = localStorage.getItem('tetro_firebase_cfg') || '';
-      document.getElementById('firebaseJsonInput').value = saved;
+      const saved = JSON.parse(localStorage.getItem('tetro_supabase_cfg') || '{}');
+      document.getElementById('supabaseUrlInput').value = saved.url || DEFAULT_SUPABASE_CONFIG.url || '';
+      document.getElementById('supabaseKeyInput').value = saved.key || DEFAULT_SUPABASE_CONFIG.key || '';
       modal.classList.remove('hidden');
     });
     document.getElementById('closeConfigBtn').addEventListener('click', () => modal.classList.add('hidden'));
     document.getElementById('saveConfigBtn').addEventListener('click', () => {
-      const raw = document.getElementById('firebaseJsonInput').value.trim();
-      try {
-        const parsed = JSON.parse(raw);
-        if (!parsed.apiKey || !parsed.databaseURL) throw new Error('필수 값 누락');
-        localStorage.setItem('tetro_firebase_cfg', JSON.stringify(parsed, null, 2));
-        location.reload();
-      } catch (err) {
-        alert('올바른 JSON 형식(apiKey, databaseURL 포함)을 입력해주세요.');
+      const url = document.getElementById('supabaseUrlInput').value.trim();
+      const key = document.getElementById('supabaseKeyInput').value.trim();
+      if (!url.startsWith('https://') || !key) {
+        alert('올바른 Project URL(https://...)과 Key를 입력해주세요.');
+        return;
       }
+      localStorage.setItem('tetro_supabase_cfg', JSON.stringify({ url, key }));
+      location.reload();
     });
     document.getElementById('resetConfigBtn').addEventListener('click', () => {
-      localStorage.removeItem('tetro_firebase_cfg');
+      localStorage.removeItem('tetro_supabase_cfg');
       location.reload();
     });
 
@@ -704,7 +694,7 @@ const App = {
       descEl.textContent = '친구들과 방 코드를 공유해 실시간 개인전 또는 팀전(RED vs BLUE)을 즐기세요.';
       this.onlineLobbyCard.classList.remove('hidden');
       this.arenaBoardsCard.classList.remove('hidden');
-      document.getElementById('onlineWarning').classList.toggle('hidden', this.firebaseReady);
+      document.getElementById('onlineWarning').classList.toggle('hidden', this.sbReady);
       this.showOverlay('ONLINE ARENA', '왼쪽에서 방을 만들거나 입장하세요.', false);
     }
   },
@@ -770,9 +760,9 @@ const App = {
     if (!this.isPaused) {
       this.player.update(dt);
       this.aiEngines.forEach(ai => ai.update(dt));
-      if (this.mode === 'online' && now - this.lastSyncTs > 350) {
+      if (this.mode === 'online' && now - this.lastSyncTs > 320) {
         this.lastSyncTs = now;
-        this.syncOnlineState(false);
+        this.syncOnlineState();
       }
       this.renderAll();
     }
@@ -784,14 +774,17 @@ const App = {
     if (this.mode === 'ai_team') {
       this.aiEngines.filter(a => a.team !== eng.team && a.alive).forEach(t => t.receiveGarbage(amount));
       this.addChatMessage('전투', `${eng.name}님이 BLUE 팀에 ${amount}줄 공격!`, true);
-    } else if (this.mode === 'online' && this.firebaseReady && this.currentRoom) {
+    } else if (this.mode === 'online' && this.roomChannel) {
       const oppTeam = this.myTeam === 'RED' ? 'BLUE' : 'RED';
-      this.db.ref(`rooms/${this.currentRoom}/attacks`).push({
-        fromId: this.myId,
-        fromName: this.getNickname(),
-        targetTeam: oppTeam,
-        amount,
-        ts: firebase.database.ServerValue.TIMESTAMP
+      this.roomChannel.send({
+        type: 'broadcast',
+        event: 'attack',
+        payload: {
+          fromId: this.myId,
+          fromName: this.getNickname(),
+          targetTeam: oppTeam,
+          amount
+        }
       });
     }
   },
@@ -810,8 +803,9 @@ const App = {
     } else if (this.mode === 'ai_team') {
       this.checkTeamBattleEnd();
     } else if (this.mode === 'online') {
-      this.syncOnlineState(true);
+      this.syncOnlineState();
       this.showOverlay('탈락!', '다른 팀원의 경기가 끝날 때까지 관전합니다.', false);
+      this.checkOnlineWin();
     }
   },
 
@@ -852,7 +846,6 @@ const App = {
     ctx.fillStyle = '#060913';
     ctx.fillRect(0, 0, this.gameCanvas.width, this.gameCanvas.height);
 
-    // 배경 격자선
     ctx.strokeStyle = 'rgba(255,255,255,0.04)';
     ctx.lineWidth = 1;
     for (let r = 0; r < ROWS; r++) {
@@ -861,7 +854,6 @@ const App = {
       }
     }
 
-    // 고정 블록
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
         if (this.player.board[r][c]) {
@@ -870,7 +862,6 @@ const App = {
       }
     }
 
-    // 고스트 & 현재 블록
     if (this.player.alive && this.player.current) {
       const { matrix, x, y } = this.player.current;
       const ghostY = this.player.getGhostY();
@@ -888,11 +879,9 @@ const App = {
       }
     }
 
-    // HOLD & NEXT 그리기
     this.drawPreview(this.holdCtx, this.holdCanvas, this.player.holdKey ? [this.player.holdKey] : []);
     this.drawPreview(this.nextCtx, this.nextCanvas, this.player.queue.slice(0, 3));
 
-    // HUD 업데이트
     this.scoreEl.textContent = this.player.score.toLocaleString();
     this.linesEl.textContent = this.player.lines;
     this.levelEl.textContent = this.player.level;
@@ -978,65 +967,62 @@ const App = {
     }
   },
 
-  /* ----------------- 랭킹 & 채팅 (로컬 + Firebase) ----------------- */
-  initFirebase() {
-    let cfg = DEFAULT_FIREBASE_CONFIG;
-    const saved = localStorage.getItem('tetro_firebase_cfg');
+  /* ----------------- 랭킹 & 채팅 (로컬 + Supabase) ----------------- */
+  async initSupabase() {
+    let cfg = DEFAULT_SUPABASE_CONFIG;
+    const saved = localStorage.getItem('tetro_supabase_cfg');
     if (saved) {
       try { cfg = JSON.parse(saved); } catch (_) {}
     }
 
-    if (typeof firebase === 'undefined' || !cfg.apiKey || !cfg.databaseURL) {
-      this.firebaseReady = false;
+    if (!window.supabase || !cfg.url || !cfg.key) {
+      this.sbReady = false;
       return;
     }
 
     try {
-      if (!firebase.apps.length) firebase.initializeApp(cfg);
-      this.db = firebase.database();
-      this.firebaseReady = true;
+      this.sb = window.supabase.createClient(cfg.url, cfg.key);
+      this.sbReady = true;
       this.connBadge.textContent = '온라인 연결됨';
       this.connBadge.className = 'badge badge-online';
       this.rankScopeLabel.textContent = '글로벌 실시간 Top 10';
-      this.listenGlobalChat();
-      this.listenRoomList();
+
+      await this.loadRecentGlobalChat();
+      this.connectLobbyChannel();
+      this.loadRankings();
     } catch (e) {
-      console.error('Firebase init failed:', e);
+      console.error('Supabase init failed:', e);
     }
   },
 
-  saveScore(score, lines, level) {
+  async saveScore(score, lines, level) {
     if (score <= 0) return;
-    const entry = {
-      name: this.getNickname(),
-      score,
-      lines,
-      level,
-      ts: Date.now()
-    };
+    const entry = { name: this.getNickname(), score, lines, level };
 
-    if (this.firebaseReady) {
-      this.db.ref('leaderboard').push(entry);
+    if (this.sbReady) {
+      await this.sb.from('leaderboard').insert([entry]);
     }
     const local = JSON.parse(localStorage.getItem('tetro_ranks') || '[]');
-    local.push(entry);
+    local.push({ ...entry, ts: Date.now() });
     local.sort((a, b) => b.score - a.score);
     localStorage.setItem('tetro_ranks', JSON.stringify(local.slice(0, 10)));
     this.loadRankings();
   },
 
-  loadRankings() {
-    if (this.firebaseReady) {
-      this.db.ref('leaderboard').orderByChild('score').limitToLast(10).once('value', snap => {
-        const rows = [];
-        snap.forEach(c => rows.push(c.val()));
-        rows.sort((a, b) => b.score - a.score);
-        this.renderRankList(rows);
-      });
-    } else {
-      const local = JSON.parse(localStorage.getItem('tetro_ranks') || '[]');
-      this.renderRankList(local);
+  async loadRankings() {
+    if (this.sbReady) {
+      const { data, error } = await this.sb
+        .from('leaderboard')
+        .select('name, score, lines, level')
+        .order('score', { ascending: false })
+        .limit(10);
+      if (!error && data) {
+        this.renderRankList(data);
+        return;
+      }
     }
+    const local = JSON.parse(localStorage.getItem('tetro_ranks') || '[]');
+    this.renderRankList(local);
   },
 
   renderRankList(rows) {
@@ -1060,22 +1046,30 @@ const App = {
     });
   },
 
-  sendChat(text) {
-    const sender = this.getNickname();
-    if (this.firebaseReady) {
-      const path = this.currentRoom ? `rooms/${this.currentRoom}/chat` : 'chat/global';
-      this.db.ref(path).push({ sender, text, ts: firebase.database.ServerValue.TIMESTAMP });
-    } else {
-      this.addChatMessage(sender, text, false);
+  async loadRecentGlobalChat() {
+    if (!this.sbReady) return;
+    const { data, error } = await this.sb
+      .from('global_chat')
+      .select('sender, text')
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (!error && data) {
+      data.reverse().forEach(m => this.addChatMessage(m.sender, m.text, false));
     }
   },
 
-  listenGlobalChat() {
-    this.db.ref('chat/global').limitToLast(25).on('child_added', snap => {
-      if (this.currentRoom) return;
-      const v = snap.val();
-      this.addChatMessage(v.sender, v.text, false);
-    });
+  async sendChat(text) {
+    const sender = this.getNickname();
+    if (this.sbReady) {
+      if (this.currentRoom && this.roomChannel) {
+        this.roomChannel.send({ type: 'broadcast', event: 'chat', payload: { sender, text } });
+      } else if (this.lobbyChannel) {
+        this.lobbyChannel.send({ type: 'broadcast', event: 'chat', payload: { sender, text } });
+        this.sb.from('global_chat').insert([{ sender, text }]).then(() => {});
+      }
+    } else {
+      this.addChatMessage(sender, text, false);
+    }
   },
 
   addChatMessage(sender, text, isSystem = false) {
@@ -1091,61 +1085,79 @@ const App = {
     this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
   },
 
-  /* ----------------- 온라인 멀티플레이 방 관리 ----------------- */
-  listenRoomList() {
-    this.db.ref('rooms').on('value', snap => {
-      const ul = document.getElementById('roomList');
-      ul.innerHTML = '';
-      let count = 0;
-      snap.forEach(child => {
-        const room = child.val();
-        if (!room || !room.players) return;
-        count++;
-        const li = document.createElement('li');
-        li.className = 'room-item';
-        const info = document.createElement('span');
-        const pCount = Object.keys(room.players).length;
-        info.textContent = `방 [${child.key}] · ${pCount}명 · ${room.status === 'playing' ? '게임 중' : '대기 중'}`;
-        const btn = document.createElement('button');
-        btn.className = 'btn btn-secondary btn-xs';
-        btn.textContent = '참여';
-        btn.onclick = () => this.joinRoom(child.key);
-        li.append(info, btn);
-        ul.appendChild(li);
+  /* ----------------- Supabase Realtime 로비 & 방 관리 ----------------- */
+  connectLobbyChannel() {
+    this.lobbyChannel = this.sb.channel('tetro:lobby', {
+      config: { broadcast: { self: true }, presence: { key: this.myId } }
+    });
+
+    this.lobbyChannel
+      .on('broadcast', { event: 'chat' }, ({ payload }) => {
+        if (this.currentRoom) return;
+        this.addChatMessage(payload.sender, payload.text, false);
+      })
+      .on('presence', { event: 'sync' }, () => {
+        this.renderRoomListFromPresence();
+      })
+      .subscribe();
+  },
+
+  renderRoomListFromPresence() {
+    if (!this.lobbyChannel) return;
+    const state = this.lobbyChannel.presenceState();
+    const roomsMap = {};
+
+    Object.values(state).forEach(entries => {
+      entries.forEach(p => {
+        if (!p.roomCode) return;
+        if (!roomsMap[p.roomCode]) {
+          roomsMap[p.roomCode] = { count: 0, status: 'waiting' };
+        }
+        roomsMap[p.roomCode].count++;
+        if (p.status === 'playing') roomsMap[p.roomCode].status = 'playing';
       });
-      if (count === 0) {
-        const li = document.createElement('li');
-        li.className = 'muted-text';
-        li.textContent = '현재 열린 방이 없습니다.';
-        ul.appendChild(li);
-      }
+    });
+
+    const ul = document.getElementById('roomList');
+    ul.innerHTML = '';
+    const codes = Object.keys(roomsMap);
+    if (codes.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'muted-text';
+      li.textContent = '현재 열린 방이 없습니다.';
+      ul.appendChild(li);
+      return;
+    }
+
+    codes.forEach(code => {
+      const infoData = roomsMap[code];
+      const li = document.createElement('li');
+      li.className = 'room-item';
+      const info = document.createElement('span');
+      info.textContent = `방 [${code}] · ${infoData.count}명 · ${infoData.status === 'playing' ? '게임 중' : '대기 중'}`;
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-secondary btn-xs';
+      btn.textContent = '참여';
+      btn.onclick = () => this.joinRoom(code);
+      li.append(info, btn);
+      ul.appendChild(li);
     });
   },
 
   createRoom() {
-    if (!this.firebaseReady) return alert('먼저 오른쪽 상단 [⚙️ 온라인 설정]에서 Firebase를 연결해주세요!');
+    if (!this.sbReady) return alert('먼저 오른쪽 상단 [⚙️ 온라인 설정]에서 Supabase를 연결해주세요!');
     const code = Math.random().toString(36).substring(2, 6).toUpperCase();
-    this.db.ref(`rooms/${code}`).set({
-      hostId: this.myId,
-      status: 'waiting',
-      createdAt: firebase.database.ServerValue.TIMESTAMP
-    }).then(() => this.joinRoom(code));
+    this.joinRoom(code);
   },
 
   joinRoom(code) {
-    if (!this.firebaseReady) return alert('Firebase 연결이 필요합니다.');
+    if (!this.sbReady) return alert('Supabase 연결이 필요합니다.');
     if (this.currentRoom) this.leaveRoom();
 
     this.currentRoom = code;
-    const playerRef = this.db.ref(`rooms/${code}/players/${this.myId}`);
-    playerRef.set({
-      name: this.getNickname(),
-      team: this.myTeam,
-      alive: true,
-      score: 0,
-      board: '0'.repeat(200)
-    });
-    playerRef.onDisconnect().remove();
+    this.roomStatus = 'waiting';
+    this.myJoinedAt = Date.now();
+    this.remotePlayers = {};
 
     document.getElementById('roomJoinArea').classList.add('hidden');
     document.getElementById('roomInsideArea').classList.remove('hidden');
@@ -1153,65 +1165,135 @@ const App = {
     this.chatMessages.innerHTML = '';
     this.addChatMessage('시스템', `[${code}] 방에 입장했습니다.`, true);
 
-    const roomRef = this.db.ref(`rooms/${code}`);
-    const onRoomVal = roomRef.on('value', snap => {
-      const room = snap.val();
-      if (!room) return;
-      this.roomHostId = room.hostId;
-      document.getElementById('startOnlineMatchBtn').classList.toggle('hidden', room.hostId !== this.myId || room.status === 'playing');
+    this.roomChannel = this.sb.channel(`tetro:room:${code}`, {
+      config: { broadcast: { self: true }, presence: { key: this.myId } }
+    });
 
-      const players = room.players || {};
-      this.renderRoomPlayers(players, room.hostId);
-
-      const others = Object.entries(players)
-        .filter(([pid]) => pid !== this.myId)
-        .map(([pid, p]) => ({ id: pid, ...p }));
-
-      if (others.length !== Object.keys(this.remotePlayers).length) {
-        this.remotePlayers = {};
-        others.forEach(o => this.remotePlayers[o.id] = o);
-        this.buildOpponentCards(others);
-      }
-      others.forEach(o => this.renderMiniBoard(o.id, o.board, o.alive, o.score));
-
-      if (room.status === 'playing' && !this.isRunning && this.roomStartTs !== room.startedAt) {
-        this.roomStartTs = room.startedAt;
+    this.roomChannel
+      .on('presence', { event: 'sync' }, () => this.syncRoomPresence())
+      .on('broadcast', { event: 'chat' }, ({ payload }) => {
+        this.addChatMessage(payload.sender, payload.text, false);
+      })
+      .on('broadcast', { event: 'start' }, () => {
+        this.roomStatus = 'playing';
+        if (this.lobbyChannel) {
+          this.lobbyChannel.track({ roomCode: this.currentRoom, status: 'playing' });
+        }
+        Object.values(this.remotePlayers).forEach(p => {
+          p.alive = true;
+          p.score = 0;
+          p.board = '0'.repeat(200);
+        });
+        document.getElementById('startOnlineMatchBtn').classList.add('hidden');
         this.startMatch();
-      } else if (room.status === 'playing' && this.isRunning) {
-        this.checkOnlineWin(players);
-      }
-    });
-
-    const attackRef = this.db.ref(`rooms/${code}/attacks`);
-    const onAttackAdded = attackRef.on('child_added', snap => {
-      const atk = snap.val();
-      if (!atk || !this.isRunning || !this.player.alive) return;
-      if (atk.fromId !== this.myId && atk.targetTeam === this.myTeam && (atk.ts || 0) >= (this.roomStartTs || 0)) {
-        this.player.receiveGarbage(atk.amount);
-        this.addChatMessage('공격', `${atk.fromName}님이 ${atk.amount}줄 공격!`, true);
-      }
-    });
-
-    const chatRef = this.db.ref(`rooms/${code}/chat`);
-    const onChatAdded = chatRef.limitToLast(20).on('child_added', snap => {
-      const v = snap.val();
-      this.addChatMessage(v.sender, v.text, false);
-    });
-
-    this.roomListeners = [
-      () => roomRef.off('value', onRoomVal),
-      () => attackRef.off('child_added', onAttackAdded),
-      () => chatRef.off('child_added', onChatAdded)
-    ];
+      })
+      .on('broadcast', { event: 'state' }, ({ payload }) => {
+        if (payload.id === this.myId) return;
+        const target = this.remotePlayers[payload.id];
+        if (target) {
+          target.alive = payload.alive;
+          target.score = payload.score;
+          target.board = payload.board;
+          target.team = payload.team;
+          this.renderMiniBoard(payload.id, payload.board, payload.alive, payload.score);
+          if (this.isRunning) this.checkOnlineWin();
+        }
+      })
+      .on('broadcast', { event: 'attack' }, ({ payload }) => {
+        if (!this.isRunning || !this.player.alive) return;
+        if (payload.fromId !== this.myId && payload.targetTeam === this.myTeam) {
+          this.player.receiveGarbage(payload.amount);
+          this.addChatMessage('공격', `${payload.fromName}님이 ${payload.amount}줄 공격!`, true);
+        }
+      })
+      .on('broadcast', { event: 'reset' }, () => {
+        this.roomStatus = 'waiting';
+        if (this.lobbyChannel) {
+          this.lobbyChannel.track({ roomCode: this.currentRoom, status: 'waiting' });
+        }
+        this.updateHostButton();
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await this.trackRoomPresence();
+          if (this.lobbyChannel) {
+            await this.lobbyChannel.track({ roomCode: code, status: 'waiting' });
+          }
+        }
+      });
   },
 
-  leaveRoom() {
+  async trackRoomPresence() {
+    if (!this.roomChannel) return;
+    await this.roomChannel.track({
+      id: this.myId,
+      name: this.getNickname(),
+      team: this.myTeam,
+      joinedAt: this.myJoinedAt
+    });
+  },
+
+  syncRoomPresence() {
+    if (!this.roomChannel) return;
+    const state = this.roomChannel.presenceState();
+    const presentList = [];
+    Object.values(state).forEach(entries => {
+      if (entries && entries.length > 0) presentList.push(entries[0]);
+    });
+
+    // 가장 먼저 입장한 사람을 방장으로 자동 지정 (방장이 나가도 자동 인계)
+    presentList.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+    this.roomHostId = presentList[0]?.id || this.myId;
+    this.updateHostButton();
+    this.renderRoomPlayers(presentList, this.roomHostId);
+
+    const others = presentList.filter(p => p.id !== this.myId);
+    const prevIds = Object.keys(this.remotePlayers).sort().join(',');
+    const nextIds = others.map(o => o.id).sort().join(',');
+
+    const nextMap = {};
+    others.forEach(o => {
+      const prev = this.remotePlayers[o.id];
+      nextMap[o.id] = {
+        id: o.id,
+        name: o.name,
+        team: o.team,
+        alive: prev ? prev.alive : true,
+        score: prev ? prev.score : 0,
+        board: prev ? prev.board : '0'.repeat(200)
+      };
+    });
+    this.remotePlayers = nextMap;
+
+    if (prevIds !== nextIds) {
+      this.buildOpponentCards(Object.values(this.remotePlayers));
+    }
+    Object.values(this.remotePlayers).forEach(o => {
+      const card = document.getElementById(`opp-card-${o.id}`);
+      if (card) {
+        card.className = `opp-card team-${o.team}` + (o.alive ? '' : ' dead');
+        const nameEl = card.querySelector('.opp-name');
+        if (nameEl) nameEl.textContent = `[${o.team}] ${o.name}`;
+      }
+      this.renderMiniBoard(o.id, o.board, o.alive, o.score);
+    });
+  },
+
+  updateHostButton() {
+    const show = this.roomHostId === this.myId && this.roomStatus !== 'playing';
+    document.getElementById('startOnlineMatchBtn').classList.toggle('hidden', !show);
+  },
+
+  async leaveRoom() {
     if (!this.currentRoom) return;
     this.stopLoop();
-    this.roomListeners.forEach(unsub => unsub());
-    this.roomListeners = [];
-    if (this.firebaseReady) {
-      this.db.ref(`rooms/${this.currentRoom}/players/${this.myId}`).remove();
+    if (this.roomChannel) {
+      await this.roomChannel.untrack();
+      await this.sb.removeChannel(this.roomChannel);
+      this.roomChannel = null;
+    }
+    if (this.lobbyChannel) {
+      await this.lobbyChannel.untrack();
     }
     this.currentRoom = null;
     this.remotePlayers = {};
@@ -1224,19 +1306,19 @@ const App = {
     this.myTeam = team;
     document.getElementById('pickRedBtn').classList.toggle('active', team === 'RED');
     document.getElementById('pickBlueBtn').classList.toggle('active', team === 'BLUE');
-    if (this.firebaseReady && this.currentRoom) {
-      this.db.ref(`rooms/${this.currentRoom}/players/${this.myId}/team`).set(team);
+    if (this.roomChannel && this.currentRoom) {
+      this.trackRoomPresence();
     }
   },
 
   renderRoomPlayers(players, hostId) {
     const ul = document.getElementById('roomPlayersList');
     ul.innerHTML = '';
-    Object.entries(players).forEach(([pid, p]) => {
+    players.forEach(p => {
       const li = document.createElement('li');
       li.className = 'player-item';
       const name = document.createElement('span');
-      name.textContent = `${pid === hostId ? '👑 ' : ''}${p.name}`;
+      name.textContent = `${p.id === hostId ? '👑 ' : ''}${p.name}`;
       const badge = document.createElement('span');
       badge.textContent = p.team;
       badge.style.color = p.team === 'RED' ? '#f87171' : '#60a5fa';
@@ -1247,27 +1329,36 @@ const App = {
   },
 
   requestOnlineStart() {
-    if (!this.firebaseReady || !this.currentRoom) return;
-    this.db.ref(`rooms/${this.currentRoom}/attacks`).remove();
-    this.db.ref(`rooms/${this.currentRoom}`).update({
-      status: 'playing',
-      startedAt: firebase.database.ServerValue.TIMESTAMP
+    if (!this.roomChannel || !this.currentRoom) return;
+    const allTeams = new Set([this.myTeam, ...Object.values(this.remotePlayers).map(p => p.team)]);
+    if (Object.keys(this.remotePlayers).length >= 1 && allTeams.size < 2) {
+      alert('양 팀(RED / BLUE)에 최소 1명씩 있어야 팀전을 시작할 수 있습니다!');
+      return;
+    }
+    this.roomChannel.send({ type: 'broadcast', event: 'start', payload: { startedAt: Date.now() } });
+  },
+
+  syncOnlineState() {
+    if (this.mode !== 'online' || !this.roomChannel || !this.currentRoom) return;
+    this.roomChannel.send({
+      type: 'broadcast',
+      event: 'state',
+      payload: {
+        id: this.myId,
+        name: this.getNickname(),
+        team: this.myTeam,
+        alive: this.player.alive,
+        score: this.player.score,
+        board: this.player.encodeBoard()
+      }
     });
   },
 
-  syncOnlineState(force) {
-    if (this.mode !== 'online' || !this.firebaseReady || !this.currentRoom) return;
-    this.db.ref(`rooms/${this.currentRoom}/players/${this.myId}`).update({
-      name: this.getNickname(),
-      team: this.myTeam,
-      alive: this.player.alive,
-      score: this.player.score,
-      board: this.player.encodeBoard()
-    });
-  },
-
-  checkOnlineWin(players) {
-    const list = Object.values(players);
+  checkOnlineWin() {
+    const list = [
+      { id: this.myId, team: this.myTeam, alive: this.player.alive },
+      ...Object.values(this.remotePlayers)
+    ];
     if (list.length < 2) return;
     const redAlive = list.some(p => p.team === 'RED' && p.alive);
     const blueAlive = list.some(p => p.team === 'BLUE' && p.alive);
@@ -1277,10 +1368,10 @@ const App = {
       this.stopLoop();
       const myWin = (this.myTeam === 'RED' && redAlive) || (this.myTeam === 'BLUE' && blueAlive);
       this.showOverlay(myWin ? 'TEAM VICTORY! 🎉' : 'DEFEAT...', `${redAlive ? 'RED' : 'BLUE'} 팀 승리!`, false);
-      if (this.roomHostId === this.myId) {
+      if (this.roomHostId === this.myId && this.roomChannel) {
         setTimeout(() => {
-          if (this.currentRoom) {
-            this.db.ref(`rooms/${this.currentRoom}/status`).set('waiting');
+          if (this.roomChannel) {
+            this.roomChannel.send({ type: 'broadcast', event: 'reset', payload: {} });
           }
         }, 2500);
       }

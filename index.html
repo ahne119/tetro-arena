@@ -8,9 +8,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;900&family=Orbitron:wght@600;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
-  <!-- Firebase Compat SDK (인터넷 미연결/로컬에서도 오류 없이 로컬 모드로 자동 동작) -->
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <!-- Supabase JS v2 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <header class="topbar">
@@ -49,7 +48,7 @@
       <div id="onlineLobbyCard" class="card hidden">
         <h2>온라인 대전 방</h2>
         <div id="onlineWarning" class="warn-box hidden">
-          현재 로컬 모드입니다. <strong>⚙️ 온라인 설정</strong>에서 Firebase 정보를 입력하면 실시간 멀티플레이가 활성화됩니다.
+          현재 로컬 모드입니다. <strong>⚙️ 온라인 설정</strong>에서 Supabase 정보를 입력하면 실시간 멀티플레이가 활성화됩니다.
         </div>
 
         <div id="roomJoinArea">
@@ -63,7 +62,7 @@
           <div class="mt-md">
             <div class="sub-title">열린 방 목록</div>
             <ul id="roomList" class="room-list">
-              <li class="muted-text">열린 방이 없습니다.</li>
+              <li class="muted-text">현재 열린 방이 없습니다.</li>
             </ul>
           </div>
         </div>
@@ -98,7 +97,6 @@
     <!-- 중앙 패널: 메인 게임 보드 -->
     <section class="panel center-panel">
       <div class="game-wrapper">
-        <!-- 홀드 & 공격 게이지 -->
         <div class="side-col">
           <div class="mini-box">
             <div class="mini-label">HOLD</div>
@@ -133,7 +131,6 @@
           </div>
         </div>
 
-        <!-- 메인 10x20 캔버스 -->
         <div class="board-container">
           <canvas id="gameCanvas" width="300" height="600"></canvas>
           <div id="boardOverlay" class="board-overlay">
@@ -143,7 +140,6 @@
           </div>
         </div>
 
-        <!-- 다음 블록 3개 -->
         <div class="side-col">
           <div class="mini-box">
             <div class="mini-label">NEXT</div>
@@ -154,7 +150,6 @@
         </div>
       </div>
 
-      <!-- 모바일 터치 컨트롤 -->
       <div class="touch-controls">
         <div class="touch-row">
           <button class="touch-btn" data-act="hold">HOLD</button>
@@ -171,13 +166,11 @@
 
     <!-- 오른쪽 패널: 팀전 현황판 + 채팅 + 랭킹 -->
     <section class="panel right-panel">
-      <!-- 팀전 미니 보드 -->
       <div id="arenaBoardsCard" class="card hidden">
         <h2>실시간 팀전 현황</h2>
         <div id="opponentsGrid" class="opponents-grid"></div>
       </div>
 
-      <!-- 채팅 & 랭킹 탭 -->
       <div class="card flex-card">
         <div class="tab-header">
           <button class="tab-btn active" data-tab="chat">💬 실시간 채팅</button>
@@ -203,22 +196,20 @@
     </section>
   </main>
 
-  <!-- Firebase 설정 모달 -->
+  <!-- Supabase 설정 모달 -->
   <div id="configModal" class="modal hidden">
     <div class="modal-card">
       <div class="modal-head">
-        <h3>Firebase 온라인 연동 설정</h3>
+        <h3>Supabase 온라인 연동 설정</h3>
         <button id="closeConfigBtn" class="btn btn-ghost btn-xs">✕</button>
       </div>
       <p class="muted-text">
-        Firebase 콘솔에서 만든 웹 앱 설정(<code>firebaseConfig</code> JSON) 또는 아래 항목을 입력하면 즉시 온라인 랭킹/채팅/멀티플레이가 활성화됩니다.
+        Supabase 프로젝트의 <strong>Project URL</strong>과 <strong>Publishable Key (또는 anon key)</strong>를 입력하면 즉시 온라인 랭킹/채팅/멀티플레이가 활성화됩니다.
       </p>
-      <textarea id="firebaseJsonInput" rows="7" placeholder='{
-  "apiKey": "...",
-  "authDomain": "...",
-  "databaseURL": "https://your-project-default-rtdb.firebaseio.com",
-  "projectId": "..."
-}'></textarea>
+      <label class="sub-title" for="supabaseUrlInput">Project URL</label>
+      <input id="supabaseUrlInput" type="text" placeholder="https://xxxxxxxx.supabase.co" />
+      <label class="sub-title" for="supabaseKeyInput">Publishable / Anon Key</label>
+      <input id="supabaseKeyInput" type="text" placeholder="sb_publishable_... 또는 eyJ..." />
       <div class="row gap-sm mt-md">
         <button id="saveConfigBtn" class="btn btn-primary full">저장 및 연결</button>
         <button id="resetConfigBtn" class="btn btn-danger">초기화</button>
