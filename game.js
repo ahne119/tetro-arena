@@ -5,7 +5,7 @@
 // [중요] 깃허브 배포 시 아래에 본인 Supabase Project URL과 Key를 입력해 올리면
 // 사이트를 방문하는 모든 사람이 별도 설정 없이 바로 온라인 기능을 이용할 수 있습니다.
 const DEFAULT_SUPABASE_CONFIG = {
-  url: "", // 예: "https://gffpfxbogevyecydmdim.supabase.co/rest/v1/"
+  url: "", // 예: "https://gffpfxbogevyecydmdim.supabase.co/rest/v1"
   key: ""  // 예: "sb_publishable_K5cV3hYlPLNGT4_wqJ4_IA_HZnmB5GO" 또는 anon public key
 };
 
